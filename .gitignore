@@ -1,0 +1,19 @@
+# clasp の認証情報(絶対にコミットしない)
+.clasprc.json
+**/.clasprc.json
+
+# scriptId を含むため、公開リポジトリではコミットしない
+.clasp.json
+
+# APIキー・秘密情報
+.env
+.env.*
+*.key
+secrets*.json
+
+# Node / エディタ / OS
+node_modules/
+.DS_Store
+.vscode/
+.idea/
+*.log

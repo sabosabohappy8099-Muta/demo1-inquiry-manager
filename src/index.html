@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <?!= include('css'); ?>
+  <!-- グラフ描画ライブラリ(Chart.js) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" defer></script>
+</head>
+<body>
+  <!-- 画面上部:会社名・ツール名・あなたの名前・更新 -->
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-company"><?= companyName ?></div>
+      <h1 class="brand-app"><?= appName ?></h1>
+    </div>
+    <div class="header-controls">
+      <label class="me-select">
+        <span>あなたの名前</span>
+        <select id="me">
+          <option value="">選んでください</option>
+        </select>
+      </label>
+      <button type="button" id="refresh" class="btn btn-ghost" title="最新の状態に更新">
+        <span class="icon-refresh" aria-hidden="true">↻</span> 更新
+      </button>
+      <span id="last-updated" class="last-updated"></span>
+    </div>
+  </header>
+
+  <!-- 名前が未選択のときの案内 -->
+  <div id="me-notice" class="notice" hidden>
+    はじめに、画面上部の「あなたの名前」を選んでください。選んだ名前はこのブラウザに保存されます。
+  </div>
+
+  <!-- タブ -->
+  <nav class="tabs" role="tablist">
+    <button type="button" class="tab is-active" data-tab="open" role="tab">未対応 <span class="badge" data-count="open">0</span></button>
+    <button type="button" class="tab" data-tab="mine" role="tab">対応中(自分) <span class="badge" data-count="mine">0</span></button>
+    <button type="button" class="tab" data-tab="progress" role="tab">対応中(全員) <span class="badge" data-count="progress">0</span></button>
+    <button type="button" class="tab" data-tab="done" role="tab">完了 <span class="badge" data-count="done">0</span></button>
+    <button type="button" class="tab" data-tab="dashboard" role="tab">ダッシュボード</button>
+  </nav>
+
+  <main class="content">
+    <div id="loading" class="loading">読み込み中…</div>
+    <section id="task-list" class="task-list" aria-live="polite"></section>
+    <section id="dashboard" class="dashboard" hidden>
+      <!-- 主要な数字 -->
+      <div class="kpi-row">
+        <div class="kpi">
+          <div class="kpi-label">今月の問い合わせ</div>
+          <div class="kpi-value"><span id="kpi-month">-</span><small>件</small></div>
+          <div class="kpi-sub" id="kpi-month-sub"></div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">未対応</div>
+          <div class="kpi-value"><span id="kpi-open">-</span><small>件</small></div>
+          <div class="kpi-sub" id="kpi-open-sub"></div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">平均初動時間</div>
+          <div class="kpi-value" id="kpi-response">-</div>
+          <div class="kpi-sub">受付から担当確定まで(直近30日)</div>
+        </div>
+      </div>
+
+      <!-- グラフ -->
+      <div class="chart-grid">
+        <div class="chart-card chart-wide">
+          <h2>直近14日の問い合わせ件数</h2>
+          <div class="chart-box"><canvas id="chart-daily" role="img" aria-label="直近14日の日別問い合わせ件数の折れ線グラフ"></canvas></div>
+          <details class="chart-table"><summary>表で見る</summary><div data-table="daily"></div></details>
+        </div>
+        <div class="chart-card">
+          <h2>種別ごとの件数</h2>
+          <div class="chart-box"><canvas id="chart-category" role="img" aria-label="種別ごとの件数の棒グラフ"></canvas></div>
+          <details class="chart-table"><summary>表で見る</summary><div data-table="category"></div></details>
+        </div>
+        <div class="chart-card">
+          <h2>ステータスごとの件数</h2>
+          <div class="chart-box"><canvas id="chart-status" role="img" aria-label="ステータスごとの件数のドーナツグラフ"></canvas></div>
+          <details class="chart-table"><summary>表で見る</summary><div data-table="status"></div></details>
+        </div>
+        <div class="chart-card chart-wide">
+          <h2>担当者ごとの対応件数</h2>
+          <div class="chart-box"><canvas id="chart-staff" role="img" aria-label="担当者ごとの対応件数の横棒グラフ"></canvas></div>
+          <details class="chart-table"><summary>表で見る</summary><div data-table="staff"></div></details>
+        </div>
+      </div>
+      <p class="dashboard-note">※ 種別・ステータス・担当者のグラフは、登録されているすべての問い合わせが対象です。</p>
+    </section>
+  </main>
+
+  <!-- トースト通知 -->
+  <div id="toast-area" class="toast-area" aria-live="assertive"></div>
+
+  <?!= include('js'); ?>
+</body>
+</html>

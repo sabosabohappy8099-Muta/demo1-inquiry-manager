@@ -1,0 +1,704 @@
+<script>
+  /**
+   * 画面側スクリプト
+   * サーバー(WebApp.js)の api〇〇 関数を google.script.run で呼び出す。
+   */
+
+  // ===== 定数 =====
+  const STORAGE_KEY_ME = 'inquiryManager.me';
+  const URGENCY_ORDER = { '高': 0, '中': 1, '低': 2 };
+  const URGENCY_CLASS = { '高': 'high', '中': 'mid', '低': 'low' };
+  const CATEGORY_CLASS = {
+    '新規相談': 'new', '見積依頼': 'estimate', '工事中の相談': 'progress',
+    'アフター・不具合': 'after', 'クレーム': 'claim', 'その他': 'other',
+  };
+
+  // ===== 画面の状態 =====
+  const state = {
+    me: '',               // あなたの名前
+    tab: 'open',          // 表示中のタブ
+    tasks: [],            // 全タスク
+    expanded: new Set(),  // 詳細を開いているカードのID
+    edits: {},            // 未保存の入力内容 { id: { memo, reply } }(自動更新で消えないように保持)
+    loading: false,
+    refreshMs: 30000,
+    staff: [],            // 担当者名の一覧
+    charts: {},           // Chart.js のインスタンス(再描画時は作り直さず更新する)
+  };
+
+  // ===== 起動 =====
+  document.addEventListener('DOMContentLoaded', function () {
+    state.me = loadMe();
+    bindEvents();
+    callApi('apiGetInitialData', [], function (res) {
+      state.staff = res.staff || [];
+      setStaffOptions(state.staff);
+      state.refreshMs = res.refreshMs || state.refreshMs;
+      setInterval(autoRefresh, state.refreshMs);
+    });
+  });
+
+  // ===== イベント =====
+  function bindEvents() {
+    document.getElementById('me').addEventListener('change', function (e) {
+      state.me = e.target.value;
+      saveMe(state.me);
+      render();
+    });
+
+    document.getElementById('refresh').addEventListener('click', function (e) {
+      refresh(e.currentTarget);
+    });
+
+    document.querySelectorAll('.tab').forEach(function (tab) {
+      tab.addEventListener('click', function () {
+        state.tab = tab.dataset.tab;
+        render();
+      });
+    });
+
+    const list = document.getElementById('task-list');
+
+    // カードの開閉・ボタン操作(イベント委任)
+    list.addEventListener('click', function (e) {
+      const head = e.target.closest('.card-head');
+      if (head) {
+        toggleCard(head.closest('.card').dataset.id);
+        return;
+      }
+      const btn = e.target.closest('button[data-action]');
+      if (btn) {
+        handleAction(btn.dataset.action, btn.closest('.card').dataset.id, btn);
+      }
+    });
+
+    // 入力中の内容を保持(自動更新で消えないように)
+    list.addEventListener('input', function (e) {
+      const field = e.target.dataset.field;
+      if (!field) return;
+      const id = e.target.closest('.card').dataset.id;
+      state.edits[id] = state.edits[id] || {};
+      state.edits[id][field] = e.target.value;
+      if (field === 'reply') {
+        const card = e.target.closest('.card');
+        const gmailBtn = card.querySelector('[data-action="gmail"]');
+        if (gmailBtn) gmailBtn.disabled = !e.target.value.trim();
+      }
+    });
+  }
+
+  /** ボタン操作 */
+  function handleAction(action, id, btn) {
+    if (!state.me) {
+      showToast('はじめに「あなたの名前」を選んでください。', 'error');
+      document.getElementById('me').focus();
+      return;
+    }
+    const card = btn.closest('.card');
+    switch (action) {
+      case 'claim':
+        runAction(btn, 'apiClaimTask', [id, state.me], function () {
+          state.expanded.add(id);
+        });
+        break;
+      case 'release':
+        if (!confirm(id + ' の担当を外して「未対応」に戻しますか?')) return;
+        runAction(btn, 'apiReleaseTask', [id, state.me]);
+        break;
+      case 'complete':
+        if (!confirm(id + ' を「完了」にしますか?')) return;
+        runAction(btn, 'apiCompleteTask', [id, state.me], function () {
+          delete state.edits[id];
+          state.expanded.delete(id);
+        });
+        break;
+      case 'memo': {
+        const memo = card.querySelector('[data-field="memo"]').value;
+        runAction(btn, 'apiSaveMemo', [id, memo, state.me], function () {
+          clearEdit(id, 'memo');
+        });
+        break;
+      }
+      case 'reply':
+        runAction(btn, 'apiCreateReplyDraft', [id, state.me], function () {
+          clearEdit(id, 'reply');
+        });
+        break;
+      case 'gmail': {
+        const text = card.querySelector('[data-field="reply"]').value;
+        runAction(btn, 'apiSaveGmailDraft', [id, text, state.me], function () {
+          clearEdit(id, 'reply');
+        });
+        break;
+      }
+    }
+  }
+
+  /** ボタンを処理中表示にしてサーバーの処理を呼ぶ */
+  function runAction(btn, fnName, args, onSuccess) {
+    setBusy(btn, true);
+    callApi(fnName, args, function (res) {
+      if (onSuccess) onSuccess(res);
+      if (res.message) showToast(res.message, 'success');
+    }, function () {
+      setBusy(btn, false);
+    });
+  }
+
+  // ===== サーバー呼び出し =====
+
+  /**
+   * サーバーの関数を呼ぶ。結果に含まれる最新の一覧で画面を描き直す。
+   * @param {string} fnName 関数名
+   * @param {Array} args 引数
+   * @param {Function=} onOk 成功時
+   * @param {Function=} onDone 成功・失敗にかかわらず最後に呼ぶ
+   */
+  function callApi(fnName, args, onOk, onDone) {
+    state.loading = true;
+    const runner = google.script.run
+      .withSuccessHandler(function (res) {
+        state.loading = false;
+        if (onDone) onDone();
+        if (res && res.tasks) {
+          state.tasks = res.tasks;
+          updateLastUpdated();
+        }
+        if (!res || !res.ok) {
+          showToast((res && res.message) || 'エラーが発生しました。', 'error');
+        } else if (onOk) {
+          onOk(res);
+        }
+        render();
+      })
+      .withFailureHandler(function (err) {
+        state.loading = false;
+        if (onDone) onDone();
+        showToast('通信に失敗しました。画面を更新してもう一度お試しください。', 'error');
+        console.error(err);
+      });
+    runner[fnName].apply(runner, args);
+  }
+
+  /** 手動更新 */
+  function refresh(btn) {
+    if (btn) setBusy(btn, true);
+    callApi('apiGetTasks', [], null, function () {
+      if (btn) setBusy(btn, false);
+    });
+  }
+
+  /** 自動更新(入力中・通信中は画面を描き直さないようにスキップ) */
+  function autoRefresh() {
+    if (state.loading || document.hidden) return;
+    const active = document.activeElement;
+    if (active && (active.tagName === 'TEXTAREA' || active.tagName === 'SELECT')) return;
+    refresh(null);
+  }
+
+  // ===== 描画 =====
+
+  function render() {
+    document.getElementById('loading').hidden = true;
+    document.getElementById('me-notice').hidden = !!state.me;
+    renderTabs();
+
+    const list = document.getElementById('task-list');
+    const dashboard = document.getElementById('dashboard');
+    if (state.tab === 'dashboard') {
+      list.hidden = true;
+      dashboard.hidden = false;
+      renderDashboard();
+      return;
+    }
+    list.hidden = false;
+    dashboard.hidden = true;
+
+    const tasks = getTabTasks(state.tab);
+    if (tasks.length === 0) {
+      list.innerHTML = '<div class="empty">' + emptyMessage(state.tab) + '</div>';
+      return;
+    }
+    list.innerHTML = tasks.map(renderCard).join('');
+  }
+
+  function renderTabs() {
+    document.querySelectorAll('.tab').forEach(function (tab) {
+      tab.classList.toggle('is-active', tab.dataset.tab === state.tab);
+    });
+    ['open', 'mine', 'progress', 'done'].forEach(function (key) {
+      const tasks = getTabTasks(key);
+      const badge = document.querySelector('[data-count="' + key + '"]');
+      badge.textContent = tasks.length;
+      // 未対応に緊急度「高」があれば赤く表示
+      const hasUrgent = key === 'open' && tasks.some(function (t) { return t.urgency === '高'; });
+      badge.classList.toggle('has-urgent', hasUrgent);
+    });
+  }
+
+  /** タブごとのタスクと並び順 */
+  function getTabTasks(tab) {
+    const byStatus = function (status) {
+      return state.tasks.filter(function (t) { return t.status === status; });
+    };
+    const byUrgencyThen = function (key) {
+      return function (a, b) {
+        const diff = (URGENCY_ORDER[a.urgency] ?? 9) - (URGENCY_ORDER[b.urgency] ?? 9);
+        return diff !== 0 ? diff : (a[key] || 0) - (b[key] || 0);
+      };
+    };
+    switch (tab) {
+      case 'open':
+        // 緊急度の高い順 → 受付日時の古い順
+        return byStatus('未対応').sort(byUrgencyThen('receivedAt'));
+      case 'mine':
+        return byStatus('対応中')
+          .filter(function (t) { return state.me && t.assignee === state.me; })
+          .sort(byUrgencyThen('assignedAt'));
+      case 'progress':
+        return byStatus('対応中').sort(byUrgencyThen('assignedAt'));
+      case 'done':
+        // 完了日時の新しい順
+        return byStatus('完了').sort(function (a, b) { return (b.completedAt || 0) - (a.completedAt || 0); });
+      default:
+        return [];
+    }
+  }
+
+  function emptyMessage(tab) {
+    if (tab === 'mine' && !state.me) return '「あなたの名前」を選ぶと、あなたが対応中の問い合わせが表示されます。';
+    return {
+      open: '未対応の問い合わせはありません。',
+      mine: 'あなたが対応中の問い合わせはありません。',
+      progress: '対応中の問い合わせはありません。',
+      done: '完了した問い合わせはありません。',
+    }[tab];
+  }
+
+  /** タスクカード */
+  function renderCard(t) {
+    const isOpen = state.expanded.has(t.id);
+    const uClass = URGENCY_CLASS[t.urgency] || 'mid';
+    const cClass = CATEGORY_CLASS[t.category] || 'other';
+
+    let elapsed = '';
+    if (t.status === '未対応' && t.receivedAt) {
+      elapsed = '<span class="elapsed">受付から' + formatElapsed(Date.now() - t.receivedAt) + '</span>';
+    }
+    let assigneeLine = '';
+    if (t.status === '対応中') {
+      assigneeLine = '<div class="card-assignee">担当:' + esc(t.assignee) + 'さん(' + formatDate(t.assignedAt) + '〜)</div>';
+    } else if (t.status === '完了') {
+      assigneeLine = '<div class="card-assignee">担当:' + esc(t.assignee) + 'さん/完了:' + formatDate(t.completedAt) + '</div>';
+    }
+
+    return ''
+      + '<article class="card urgency-' + uClass + '" data-id="' + esc(t.id) + '">'
+      +   '<button type="button" class="card-head" aria-expanded="' + isOpen + '">'
+      +     '<span class="card-toggle">' + (isOpen ? '閉じる ▲' : '詳細 ▼') + '</span>'
+      +     '<div class="card-meta">'
+      +       '<span class="card-id">' + esc(t.id) + '</span>'
+      +       '<span>' + formatDate(t.receivedAt) + '</span>'
+      +       '<span class="urgency urgency-badge-' + uClass + '">緊急度 ' + esc(t.urgency) + '</span>'
+      +       '<span class="label cat-' + cClass + '">' + esc(t.category) + '</span>'
+      +       elapsed
+      +     '</div>'
+      +     '<div class="card-title">' + esc(t.name) + ' 様</div>'
+      +     '<p class="card-summary">' + esc(t.summary) + '</p>'
+      +     assigneeLine
+      +   '</button>'
+      +   (isOpen ? renderDetail(t) : '')
+      + '</article>';
+  }
+
+  /** カードの詳細部分 */
+  function renderDetail(t) {
+    const edit = state.edits[t.id] || {};
+    const isMine = t.status === '対応中' && state.me && t.assignee === state.me;
+    const memo = edit.memo !== undefined ? edit.memo : t.memo;
+
+    let html = '<div class="card-body">'
+      + '<div class="detail-grid">'
+      +   '<div class="detail-block detail-full"><h3>お問い合わせ内容</h3><p>' + esc(t.body) + '</p></div>'
+      +   '<div class="detail-block"><h3>メールアドレス</h3><p><a href="mailto:' + esc(t.email) + '">' + esc(t.email) + '</a></p></div>'
+      +   '<div class="detail-block"><h3>電話番号</h3><p>'
+      +     (t.phone ? '<a href="tel:' + esc(t.phone) + '">' + esc(t.phone) + '</a>' : '(未入力)') + '</p></div>'
+      +   '<div class="detail-block"><h3>ステータス</h3><p>' + esc(t.status) + '</p></div>'
+      +   '<div class="detail-block"><h3>AI判定モード</h3><p>' + esc(t.aiMode || '-') + '</p></div>'
+      + '</div>';
+
+    // 状態ごとの操作
+    if (t.status === '未対応') {
+      html += '<div class="actions main">'
+        + '<button type="button" class="btn btn-primary btn-large" data-action="claim">対応する</button>'
+        + '</div>';
+    } else if (t.status === '対応中' && !isMine) {
+      html += '<div class="status-note is-other">' + esc(t.assignee) + 'さんが対応中です</div>';
+    } else if (t.status === '完了') {
+      html += '<div class="status-note">この問い合わせは完了しています</div>';
+    }
+
+    // 自分の対応中タスク:返信文の作成・Gmail下書き・完了・担当を外す
+    if (isMine) {
+      const reply = edit.reply !== undefined ? edit.reply : t.replyDraft;
+      html += '<div class="status-note">あなたが対応中です</div>'
+        + '<div class="field">'
+        +   '<label for="reply-' + esc(t.id) + '">返信文(編集できます)</label>'
+        +   '<textarea id="reply-' + esc(t.id) + '" class="reply" data-field="reply" '
+        +     'placeholder="「返信文を作成」を押すと、AIが下書きを作成します。">' + esc(reply) + '</textarea>'
+        + '</div>'
+        + '<div class="actions">'
+        +   '<button type="button" class="btn btn-secondary" data-action="reply">✎ 返信文を作成</button>'
+        +   '<button type="button" class="btn btn-secondary" data-action="gmail"' + (reply.trim() ? '' : ' disabled') + '>✉ Gmailの下書きに保存</button>'
+        + '</div>'
+        + '<div class="actions main">'
+        +   '<button type="button" class="btn btn-primary" data-action="complete">✓ 完了にする</button>'
+        +   '<button type="button" class="btn btn-danger-ghost" data-action="release">担当を外す</button>'
+        + '</div>';
+    }
+
+    // 対応メモ(誰でも記入できる)
+    html += '<div class="field">'
+      +   '<label for="memo-' + esc(t.id) + '">対応メモ</label>'
+      +   '<textarea id="memo-' + esc(t.id) + '" data-field="memo" placeholder="対応の経過や引き継ぎ事項を記入">' + esc(memo) + '</textarea>'
+      + '</div>'
+      + '<div class="actions">'
+      +   '<button type="button" class="btn btn-ghost" data-action="memo">メモを保存</button>'
+      + '</div>'
+      + '</div>';
+    return html;
+  }
+
+  function toggleCard(id) {
+    if (state.expanded.has(id)) {
+      state.expanded.delete(id);
+    } else {
+      state.expanded.add(id);
+    }
+    render();
+  }
+
+  // ===== ダッシュボード =====
+
+  const CATEGORY_ORDER = ['新規相談', '見積依頼', '工事中の相談', 'アフター・不具合', 'クレーム', 'その他'];
+  const STATUS_ORDER = ['未対応', '対応中', '完了'];
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  function renderDashboard() {
+    const tasks = state.tasks;
+    const now = new Date();
+
+    // --- 主要な数字 ---
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    const prevMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1).getTime();
+    const monthCount = tasks.filter(function (t) { return t.receivedAt >= monthStart; }).length;
+    const prevCount = tasks.filter(function (t) { return t.receivedAt >= prevMonthStart && t.receivedAt < monthStart; }).length;
+    setText('kpi-month', monthCount);
+    setText('kpi-month-sub', '先月 ' + prevCount + '件');
+
+    const openTasks = tasks.filter(function (t) { return t.status === '未対応'; });
+    const urgentCount = openTasks.filter(function (t) { return t.urgency === '高'; }).length;
+    setText('kpi-open', openTasks.length);
+    setText('kpi-open-sub', urgentCount > 0 ? 'うち緊急度「高」' + urgentCount + '件' : '緊急度「高」はありません');
+
+    const since = now.getTime() - 30 * DAY_MS;
+    const durations = tasks
+      .filter(function (t) { return t.assignedAt && t.receivedAt && t.receivedAt >= since; })
+      .map(function (t) { return t.assignedAt - t.receivedAt; });
+    const avg = durations.length
+      ? durations.reduce(function (a, b) { return a + b; }, 0) / durations.length
+      : null;
+    document.getElementById('kpi-response').innerHTML = avg === null ? '-' : formatDurationHtml(avg);
+
+    // --- 集計 ---
+    const daily = countDaily(tasks, now, 14);
+    const byCategory = CATEGORY_ORDER.map(function (c) {
+      return tasks.filter(function (t) { return t.category === c; }).length;
+    });
+    const byStatus = STATUS_ORDER.map(function (st) {
+      return tasks.filter(function (t) { return t.status === st; }).length;
+    });
+    const staffNames = state.staff.slice();
+    tasks.forEach(function (t) {
+      if (t.assignee && staffNames.indexOf(t.assignee) === -1) staffNames.push(t.assignee);
+    });
+    const staffProgress = staffNames.map(function (n) {
+      return tasks.filter(function (t) { return t.assignee === n && t.status === '対応中'; }).length;
+    });
+    const staffDone = staffNames.map(function (n) {
+      return tasks.filter(function (t) { return t.assignee === n && t.status === '完了'; }).length;
+    });
+
+    // --- 表(グラフの数値を表でも確認できるように) ---
+    renderTable('daily', ['日付', '件数'], daily.labels.map(function (l, i) { return [l, daily.counts[i]]; }));
+    renderTable('category', ['種別', '件数'], CATEGORY_ORDER.map(function (c, i) { return [c, byCategory[i]]; }));
+    renderTable('status', ['ステータス', '件数'], STATUS_ORDER.map(function (st, i) { return [st, byStatus[i]]; }));
+    renderTable('staff', ['担当者', '対応中', '完了', '合計'], staffNames.map(function (n, i) {
+      return [n, staffProgress[i], staffDone[i], staffProgress[i] + staffDone[i]];
+    }));
+
+    // --- グラフ(Chart.js の読み込みが終わってから描画) ---
+    if (!window.Chart) {
+      chartLoadRetries++;
+      if (chartLoadRetries <= 30) {
+        setTimeout(function () { if (state.tab === 'dashboard') renderDashboard(); }, 300);
+      } else if (chartLoadRetries === 31) {
+        showToast('グラフの読み込みに失敗しました。表で数値を確認できます。', 'error');
+      }
+      return;
+    }
+    setupChartDefaults();
+    const css = getComputedStyle(document.getElementById('dashboard'));
+    const color = function (name) { return css.getPropertyValue(name).trim(); };
+    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+    const grid = color('--grid');
+    const statusColors = [color('--series-open'), color('--series-progress'), color('--series-done')];
+
+    upsertChart('daily', {
+      type: 'line',
+      data: {
+        labels: daily.labels,
+        datasets: [{
+          label: '問い合わせ件数',
+          data: daily.counts,
+          borderColor: accent,
+          backgroundColor: accent,
+          borderWidth: 2,
+          pointRadius: 4,
+          pointHoverRadius: 6,
+          pointBorderColor: '#fff',
+          pointBorderWidth: 2,
+          tension: 0,
+        }],
+      },
+      options: {
+        interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: countLabel } } },
+        scales: {
+          x: { grid: { display: false } },
+          y: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: grid }, border: { display: false } },
+        },
+      },
+    });
+
+    upsertChart('category', {
+      type: 'bar',
+      data: {
+        labels: CATEGORY_ORDER,
+        datasets: [{
+          label: '件数',
+          data: byCategory,
+          backgroundColor: accent,
+          borderRadius: 4,
+          maxBarThickness: 22,
+        }],
+      },
+      options: {
+        indexAxis: 'y',
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: countLabel } } },
+        scales: {
+          x: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: grid }, border: { display: false } },
+          y: { grid: { display: false } },
+        },
+      },
+    });
+
+    upsertChart('status', {
+      type: 'doughnut',
+      data: {
+        // 凡例に件数も表示する(色だけに頼らない)
+        labels: STATUS_ORDER.map(function (st, i) { return st + '(' + byStatus[i] + '件)'; }),
+        datasets: [{
+          data: byStatus,
+          backgroundColor: statusColors,
+          borderColor: '#fff',
+          borderWidth: 2,
+          hoverOffset: 4,
+        }],
+      },
+      options: {
+        cutout: '62%',
+        plugins: {
+          legend: { position: 'right', labels: { usePointStyle: true, pointStyle: 'circle', padding: 14 } },
+          tooltip: { callbacks: { label: function (ctx) { return ' ' + ctx.label; } } },
+        },
+      },
+    });
+
+    upsertChart('staff', {
+      type: 'bar',
+      data: {
+        labels: staffNames,
+        datasets: [
+          { label: '対応中', data: staffProgress, backgroundColor: statusColors[1], borderColor: '#fff', borderWidth: { right: 2 }, borderSkipped: false, maxBarThickness: 22 },
+          { label: '完了', data: staffDone, backgroundColor: statusColors[2], borderColor: '#fff', borderWidth: { right: 2 }, borderSkipped: false, maxBarThickness: 22 },
+        ],
+      },
+      options: {
+        indexAxis: 'y',
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { position: 'top', align: 'start', labels: { usePointStyle: true, pointStyle: 'rectRounded' } },
+          tooltip: { callbacks: { label: function (ctx) { return ' ' + ctx.dataset.label + ':' + ctx.parsed.x + '件'; } } },
+        },
+        scales: {
+          x: { stacked: true, beginAtZero: true, ticks: { precision: 0 }, grid: { color: grid }, border: { display: false } },
+          y: { stacked: true, grid: { display: false } },
+        },
+      },
+    });
+  }
+
+  /** 直近 days 日の日別件数 */
+  function countDaily(tasks, now, days) {
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const labels = [];
+    const counts = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const start = new Date(today - i * DAY_MS);
+      const startMs = new Date(start.getFullYear(), start.getMonth(), start.getDate()).getTime();
+      const endMs = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1).getTime();
+      labels.push((start.getMonth() + 1) + '/' + start.getDate());
+      counts.push(tasks.filter(function (t) { return t.receivedAt >= startMs && t.receivedAt < endMs; }).length);
+    }
+    return { labels: labels, counts: counts };
+  }
+
+  /** グラフを作成、または既存のグラフのデータを更新する */
+  function upsertChart(key, config) {
+    const existing = state.charts[key];
+    if (existing) {
+      existing.data = config.data;
+      existing.options = Object.assign(existing.options, config.options);
+      existing.update('none');
+      return;
+    }
+    config.options = Object.assign({ responsive: true, maintainAspectRatio: false }, config.options);
+    state.charts[key] = new Chart(document.getElementById('chart-' + key), config);
+  }
+
+  let chartDefaultsReady = false;
+  let chartLoadRetries = 0;
+  function setupChartDefaults() {
+    if (chartDefaultsReady) return;
+    Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+    Chart.defaults.font.size = 12;
+    Chart.defaults.color = '#607d8b';
+    Chart.defaults.animation.duration = 400;
+    Chart.defaults.plugins.tooltip.backgroundColor = '#263238';
+    Chart.defaults.plugins.tooltip.padding = 10;
+    chartDefaultsReady = true;
+  }
+
+  function countLabel(ctx) {
+    return ' ' + ctx.parsed[ctx.chart.options.indexAxis === 'y' ? 'x' : 'y'] + '件';
+  }
+
+  function renderTable(key, headers, rows) {
+    const html = '<table><thead><tr>'
+      + headers.map(function (h, i) { return '<th' + (i > 0 ? ' class="num"' : '') + '>' + esc(h) + '</th>'; }).join('')
+      + '</tr></thead><tbody>'
+      + rows.map(function (r) {
+        return '<tr>' + r.map(function (v, i) { return '<td' + (i > 0 ? ' class="num"' : '') + '>' + esc(v) + '</td>'; }).join('') + '</tr>';
+      }).join('')
+      + '</tbody></table>';
+    document.querySelector('[data-table="' + key + '"]').innerHTML = html;
+  }
+
+  function setText(id, value) {
+    document.getElementById(id).textContent = value;
+  }
+
+  /** 平均初動時間の表示(例:2<small>時間</small>15<small>分</small>) */
+  function formatDurationHtml(ms) {
+    const totalMin = Math.round(ms / 60000);
+    const h = Math.floor(totalMin / 60);
+    const m = totalMin % 60;
+    if (h === 0) return m + '<small>分</small>';
+    return h + '<small>時間</small>' + m + '<small>分</small>';
+  }
+
+  // ===== 部品 =====
+
+  function setStaffOptions(names) {
+    const select = document.getElementById('me');
+    names.forEach(function (name) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      select.appendChild(opt);
+    });
+    // 保存されていた名前が担当者にいなければ未選択に戻す
+    if (names.indexOf(state.me) === -1) {
+      state.me = '';
+      saveMe('');
+    }
+    select.value = state.me;
+  }
+
+  /** ボタンの処理中表示(二重送信防止) */
+  function setBusy(btn, busy) {
+    if (!btn || !btn.isConnected) return;
+    if (busy) {
+      btn.dataset.label = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner" aria-hidden="true"></span>処理中…';
+    } else if (btn.dataset.label) {
+      btn.innerHTML = btn.dataset.label;
+      btn.disabled = false;
+    }
+  }
+
+  function showToast(message, type) {
+    const area = document.getElementById('toast-area');
+    const toast = document.createElement('div');
+    toast.className = 'toast ' + (type || 'success');
+    toast.textContent = message;
+    area.appendChild(toast);
+    setTimeout(function () { toast.remove(); }, type === 'error' ? 5000 : 3500);
+  }
+
+  function clearEdit(id, field) {
+    if (state.edits[id]) delete state.edits[id][field];
+  }
+
+  function updateLastUpdated() {
+    document.getElementById('last-updated').textContent = '最終更新 ' + formatTime(new Date());
+  }
+
+  // ブラウザへの名前の保存(使えない環境でも動くように try/catch)
+  function loadMe() {
+    try { return localStorage.getItem(STORAGE_KEY_ME) || ''; } catch (e) { return ''; }
+  }
+  function saveMe(name) {
+    try { localStorage.setItem(STORAGE_KEY_ME, name); } catch (e) { /* 保存できなくても動作は続ける */ }
+  }
+
+  // ===== 書式 =====
+
+  function esc(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function pad(n) { return String(n).padStart(2, '0'); }
+
+  function formatDate(ms) {
+    if (!ms) return '';
+    const d = new Date(ms);
+    return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+
+  function formatTime(d) {
+    return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  }
+
+  function formatElapsed(ms) {
+    const min = Math.floor(ms / 60000);
+    if (min < 60) return min + '分';
+    const hours = Math.floor(min / 60);
+    if (hours < 24) return hours + '時間';
+    return Math.floor(hours / 24) + '日';
+  }
+</script>
