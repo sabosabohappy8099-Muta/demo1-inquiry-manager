@@ -161,6 +161,8 @@ function getProp_(key) {
  * @return {string}
  */
 function getAiProvider_() {
+  // 公開デモでは API を使わない(費用がかからず、外部への通信の権限も持たせない)
+  if (PUBLIC_DEMO_MODE) return AI_PROVIDERS.MOCK;
   const value = String(getProp_(PROP_KEYS.AI_PROVIDER) || '').trim().toUpperCase();
   return AI_PROVIDERS[value] || AI_PROVIDERS.MOCK;
 }
@@ -171,6 +173,8 @@ function getAiProvider_() {
  * @return {GoogleAppsScript.Spreadsheet.Spreadsheet}
  */
 function getSpreadsheet_() {
+  // 公開デモは「このスクリプトが付いているスプレッドシート」しか開けない権限で動かす
+  if (PUBLIC_DEMO_MODE) return SpreadsheetApp.getActiveSpreadsheet();
   const id = getProp_(PROP_KEYS.SPREADSHEET_ID);
   return id ? SpreadsheetApp.openById(id) : SpreadsheetApp.getActiveSpreadsheet();
 }

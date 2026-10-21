@@ -23,10 +23,30 @@ function notifyNewInquiry_(inquiry) {
 
   const subject = buildNotifySubject_(inquiry);
   const body = buildNotifyBody_(inquiry);
-  GmailApp.sendEmail(recipients.join(','), subject, body, {
-    name: getSetting_('COMPANY_NAME') + ' ' + APP_NAME,
-  });
+  sendNotifyMail_(recipients.join(','), subject, body);
   return true;
+}
+
+/**
+ * 担当者への通知メールを送る。公開デモでは送らずに「送信記録(デモ)」シートに残す。
+ */
+function sendNotifyMail_(to, subject, body) {
+  if (PUBLIC_DEMO_MODE) {
+    recordDemoMail_('担当者への通知', to, subject, body);
+    return;
+  }
+  GmailApp.sendEmail(to, subject, body, { name: getSetting_('COMPANY_NAME') + ' ' + APP_NAME });
+}
+
+/**
+ * お客様への返信を Gmail の下書きに保存する。公開デモでは保存せずに「送信記録(デモ)」シートに残す。
+ */
+function createCustomerDraft_(to, subject, body) {
+  if (PUBLIC_DEMO_MODE) {
+    recordDemoMail_('返信の下書き', to, subject, body);
+    return;
+  }
+  GmailApp.createDraft(to, subject, body, { name: getSetting_('COMPANY_NAME') });
 }
 
 /**

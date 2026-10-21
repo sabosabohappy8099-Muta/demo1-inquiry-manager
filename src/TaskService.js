@@ -175,12 +175,15 @@ function saveGmailDraft_(id, replyText, staffName) {
 
   const companyName = getSetting_('COMPANY_NAME');
   const subject = '【' + companyName + '】お問い合わせの件につきまして(' + id + ')';
-  GmailApp.createDraft(task.email, subject, text, { name: companyName });
+  createCustomerDraft_(task.email, subject, text);
 
   withLock_(function () {
     setTaskFields_(findTaskRow_(id).rowIndex, { REPLY_DRAFT: text });
   });
   writeLog_('Gmail下書き保存', '成功', id + ' ' + staffName);
+  if (PUBLIC_DEMO_MODE) {
+    return { message: 'デモのため、実際の Gmail には保存しません。本番では Gmail の下書きに保存され、内容を確認してから送信します。' };
+  }
   return { message: 'Gmailの下書きに保存しました。Gmailで内容を確認してから送信してください。' };
 }
 

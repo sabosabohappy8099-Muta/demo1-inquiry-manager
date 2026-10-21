@@ -17,3 +17,8 @@ node_modules/
 .vscode/
 .idea/
 *.log
+
+# 公開デモ:組み立てた版と、公開デモ用の scriptId(公開リポジトリではコミットしない)
+build/
+.clasp.public.json
+.public-deployment-id

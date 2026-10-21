@@ -159,7 +159,8 @@ function seedStaff_(ss) {
     console.log('担当者は既に登録済みのため、追加をスキップしました。');
     return;
   }
-  const myEmail = Session.getEffectiveUser().getEmail();
+  // 公開デモでは自分のアドレスを使わない(架空のアドレスにする)
+  const myEmail = PUBLIC_DEMO_MODE ? DEMO_STAFF_EMAIL : Session.getEffectiveUser().getEmail();
   const rows = DEMO_STAFF.map(function (s) {
     return [s[0], myEmail, s[1]];
   });

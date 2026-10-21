@@ -8,6 +8,16 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" defer></script>
 </head>
 <body>
+  <? if (publicDemo) { ?>
+  <!-- 公開デモの案内 -->
+  <div class="demo-banner" role="note">
+    <strong>ポートフォリオ用のデモです。</strong>
+    会社・お客様・担当者はすべて架空です。自由に操作できます。メールは実際には送信されず、データは毎朝<?= publicDemo.resetHour ?>時に最初の状態に戻ります。
+    <? if (publicDemo.formUrl) { ?>
+      <a href="<?= publicDemo.formUrl ?>" target="_blank" rel="noopener">問い合わせフォームから送って試す</a>(数秒後に「更新」を押すと一覧に出ます)
+    <? } ?>
+  </div>
+  <? } ?>
   <!-- 画面上部:会社名・ツール名・あなたの名前・更新 -->
   <header class="app-header">
     <div class="brand">

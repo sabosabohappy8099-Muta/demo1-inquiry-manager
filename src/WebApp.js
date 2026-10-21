@@ -16,6 +16,7 @@ function doGet() {
     const template = HtmlService.createTemplateFromFile('index');
     template.companyName = getSetting_('COMPANY_NAME');
     template.appName = APP_NAME;
+    template.publicDemo = getPublicDemoInfo_();
     return template.evaluate()
       .setTitle(APP_NAME + '|' + template.companyName)
       .addMetaTag('viewport', 'width=device-width, initial-scale=1');
